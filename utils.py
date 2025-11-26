@@ -809,63 +809,69 @@ def treat_runtimeparams(
             )
         params["optim_conf"]["set_capacity_tariff"] = set_capacity_tariff
 
+        # Handle capacity_tariff_threshold (scalar or list)
         if "capacity_tariff_threshold" not in runtimeparams.keys():
             capacity_tariff_threshold = 5000
         else:
             capacity_tariff_threshold = runtimeparams["capacity_tariff_threshold"]
-            # Check if it's a list (time-series threshold)
+            
+            # Parse string input if needed
             if isinstance(capacity_tariff_threshold, str):
                 try:
-                    # Try to parse as list
                     parsed = ast.literal_eval(capacity_tariff_threshold)
-                    if isinstance(parsed, list):
-                        capacity_tariff_threshold = parsed
-                    else:
-                        capacity_tariff_threshold = float(parsed)
-                except:
-                    # If parsing fails, treat as single value
-                    try:
-                        capacity_tariff_threshold = float(capacity_tariff_threshold)
-                    except:
-                        logger.warning(
-                            f"Invalid capacity_tariff_threshold value: {capacity_tariff_threshold}, defaulting to 5000"
-                        )
-                        capacity_tariff_threshold = 5000
+                    capacity_tariff_threshold = parsed if isinstance(parsed, list) else float(parsed)
+                except (ValueError, SyntaxError):
+                    logger.warning(
+                        f"Invalid capacity_tariff_threshold value: {capacity_tariff_threshold}, "
+                        f"defaulting to 5000"
+                    )
+                    capacity_tariff_threshold = 5000
             
-            # Validate list length if it's a list
+            # Validate list length
             if isinstance(capacity_tariff_threshold, list):
-                if len(capacity_tariff_threshold) >= len(forecast_dates):
-                    # List is valid, use it
+                expected_len = len(forecast_dates)
+                actual_len = len(capacity_tariff_threshold)
+                
+                if actual_len >= expected_len:
                     logger.info(
-                        f"Time-series capacity tariff threshold with {len(capacity_tariff_threshold)} values"
+                        f"Time-series capacity tariff threshold with {actual_len} values"
                     )
                 else:
                     logger.warning(
-                        f"capacity_tariff_threshold list length ({len(capacity_tariff_threshold)}) "
-                        f"is less than forecast length ({len(forecast_dates)}). Using single threshold mode."
+                        f"Capacity tariff threshold list length ({actual_len}) is less than "
+                        f"forecast length ({expected_len}). Using single threshold mode."
                     )
-                    # Take the first non-zero value or default
-                    capacity_tariff_threshold = next((x for x in capacity_tariff_threshold if x > 0), 5000)
-
+                    # Fall back to first non-zero value or default
+                    capacity_tariff_threshold = next(
+                        (x for x in capacity_tariff_threshold if x > 0), 5000
+                    )
+        
         params["optim_conf"]["capacity_tariff_threshold"] = capacity_tariff_threshold
 
+        # Handle capacity_tariff_penalty
         if "capacity_tariff_penalty" not in runtimeparams.keys():
             capacity_tariff_penalty = 10.0
         else:
             try:
                 capacity_tariff_penalty = float(runtimeparams["capacity_tariff_penalty"])
-            except:
+            except (ValueError, TypeError):
                 logger.warning(
-                    f"Invalid capacity_tariff_penalty value: {runtimeparams['capacity_tariff_penalty']}, defaulting to 10.0"
+                    f"Invalid capacity_tariff_penalty value: "
+                    f"{runtimeparams['capacity_tariff_penalty']}, defaulting to 10.0"
                 )
                 capacity_tariff_penalty = 10.0
-        params["optim_conf"]["capacity_tariff_penalty"] = capacity_tariff_penalty
         
+        params["optim_conf"]["capacity_tariff_penalty"] = capacity_tariff_penalty
+
         # Treat plant configuration parameters passed at runtime
         if "maximum_power_from_grid" in runtimeparams.keys():
-            params["plant_conf"]["maximum_power_from_grid"] = runtimeparams["maximum_power_from_grid"]
+            params["plant_conf"]["maximum_power_from_grid"] = runtimeparams[
+                "maximum_power_from_grid"
+            ]
         if "maximum_power_to_grid" in runtimeparams.keys():
-            params["plant_conf"]["maximum_power_to_grid"] = runtimeparams["maximum_power_to_grid"]
+            params["plant_conf"]["maximum_power_to_grid"] = runtimeparams[
+                "maximum_power_to_grid"
+            ]
             
         # Param to save forecast cache (i.e. Solcast)
         if "weather_forecast_cache" not in runtimeparams.keys():
