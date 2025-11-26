@@ -122,37 +122,27 @@ class Optimization:
         )
         self.logger.debug(f"Number of threads: {self.num_threads}")
         
-        # Capacity tariff configuration 
+        # Capacity tariff configuration
         self.set_capacity_tariff = optim_conf.get("set_capacity_tariff", False)
         if self.set_capacity_tariff:
-            self.capacity_threshold = optim_conf.get("capacity_tariff_threshold", 5000)
-            self.capacity_penalty = optim_conf.get("capacity_tariff_penalty", 10.0)
-            # Check if threshold is a list/array for time-series thresholds
-            self.capacity_threshold_is_list = isinstance(self.capacity_threshold, (list, np.ndarray))
-            if self.capacity_threshold_is_list:
-                self.logger.info(f"Capacity tariff enabled with time-series thresholds, penalty={self.capacity_penalty}")
+            raw_threshold = optim_conf.get("capacity_tariff_threshold", 5000)
+            self.capacity_penalty = float(optim_conf.get("capacity_tariff_penalty", 10.0))
+            
+            # Handle both scalar and time-series thresholds
+            if isinstance(raw_threshold, (list, np.ndarray)):
+                self.capacity_threshold = [float(v) for v in raw_threshold]
+                self.capacity_threshold_is_list = True
+                self.logger.info(
+                    f"Capacity tariff enabled with time-series thresholds, "
+                    f"penalty={self.capacity_penalty}"
+                )
             else:
-                self.logger.info(f"Capacity tariff enabled: threshold={self.capacity_threshold}W, penalty={self.capacity_penalty}")
-        
-        raw_threshold = optim_conf.get("capacity_tariff_threshold", 5000)
-        self.capacity_penalty = float(optim_conf.get("capacity_tariff_penalty", 10.0))
-
-        # If list → convert to list of floats
-        if isinstance(raw_threshold, (list, np.ndarray)):
-            self.capacity_threshold = [float(v) for v in raw_threshold]
-            self.capacity_threshold_is_list = True
-            self.logger.info(
-                f"Capacity tariff enabled with time-series thresholds, "
-                f"penalty={self.capacity_penalty}"
-            )
-        else:
-            # Scalar → turn into float
-            self.capacity_threshold = float(raw_threshold)
-            self.capacity_threshold_is_list = False
-            self.logger.info(
-                f"Capacity tariff enabled: threshold={self.capacity_threshold}W, "
-                f"penalty={self.capacity_penalty}"
-            )
+                self.capacity_threshold = float(raw_threshold)
+                self.capacity_threshold_is_list = False
+                self.logger.info(
+                    f"Capacity tariff enabled: threshold={self.capacity_threshold}W, "
+                    f"penalty={self.capacity_penalty}"
+                )
             
     def perform_optimization(
         self,
@@ -240,9 +230,10 @@ class Optimization:
                 active_count = np.sum(capacity_threshold_array > 0)
                 unique_thresholds = np.unique(capacity_threshold_array[capacity_threshold_array > 0])
                 self.logger.info(
-                    f"Capacity tariff active for {active_count}/{n} timesteps with {len(unique_thresholds)} unique threshold(s)"
+                    f"Capacity tariff active for {active_count}/{n} timesteps "
+                    f"with {len(unique_thresholds)} unique threshold(s)"
                 )
-        
+            
         # If def_total_timestep os set, bypass def_total_hours
         if def_total_timestep is not None:
             if def_total_hours is None:
@@ -298,10 +289,6 @@ class Optimization:
             )
             for i in set_I
         }
-        # Debug logging for grid power limits
-        self.logger.info(f"DEBUG: maximum_power_from_grid = {self.plant_conf.get('maximum_power_from_grid', 'NOT SET')}")
-        self.logger.info(f"DEBUG: maximum_power_to_grid = {self.plant_conf.get('maximum_power_to_grid', 'NOT SET')}")
-        self.logger.info(f"DEBUG: All plant_conf keys: {list(self.plant_conf.keys())}")
         P_grid_pos = {
             (i): plp.LpVariable(
                 cat="Continuous",
@@ -435,10 +422,6 @@ class Optimization:
         }
         
         # Capacity tariff tracking variable(s) - simplified per-timestep approach
-        if self.set_capacity_tariff:
-            # No need for P_peak tracking with per-timestep penalties
-            # We'll just track excess at each timestep directly
-            pass
             
         ## Define objective
         P_def_sum = []
@@ -536,12 +519,13 @@ class Optimization:
                         for i in set_I
                     )
                     
-        # Add capacity tariff penalty to objective function - per-timestep penalties
+        # Add capacity tariff penalty to objective function
         P_excess = {}
         active_periods = {}
+        
         if self.set_capacity_tariff:
             if self.capacity_threshold_is_list:
-                # Build active_periods mapping
+                # Build mapping of thresholds to timesteps
                 for i in set_I:
                     threshold_i = capacity_threshold_array[i]
                     if threshold_i > 0:
@@ -549,51 +533,40 @@ class Optimization:
                         if threshold_key not in active_periods:
                             active_periods[threshold_key] = []
                         active_periods[threshold_key].append(i)
-                        
-                # ADD THIS DEBUG
-                self.logger.info(f"DEBUG: active_periods = {active_periods}")
-                self.logger.info(f"DEBUG: capacity_threshold_array[50:58] = {capacity_threshold_array[50:58]}")
                 
-                # For time-series thresholds - create excess variable for each active timestep
+                # Create excess variable for each active timestep
                 for threshold_val, timesteps in active_periods.items():
                     for i in timesteps:
                         var_name = f"P_excess_{int(threshold_val)}_{i}"
                         P_excess[i] = plp.LpVariable(var_name, lowBound=0, cat="Continuous")
                 
-                # Add penalty for EACH timestep's excess (not just peak)
+                # Add per-timestep penalty
                 capacity_penalty_term = plp.lpSum(
                     -self.capacity_penalty * P_excess[i]
                     for i in P_excess.keys()
                 )
                 objective = objective + capacity_penalty_term
                 self.logger.info(
-                    f"Added per-timestep capacity tariff penalty to objective for {len(P_excess)} timesteps "
+                    f"Added per-timestep capacity tariff penalty for {len(P_excess)} timesteps "
                     f"across {len(active_periods)} threshold level(s)"
                 )
-                # ADD THIS
-                self.logger.info(f"DEBUG: capacity_penalty value = {self.capacity_penalty}")
-                # self.logger.info(f"DEBUG: First P_excess variable name = {P_excess[28].name}")
-                # Try to print the coefficient
-                test_coeff = -self.capacity_penalty 
-                self.logger.info(f"DEBUG: Penalty coefficient per W = {test_coeff}")
             else:
-                # For single threshold - create excess variable for each timestep
+                # Single threshold - create excess variable for each timestep
                 for i in set_I:
                     P_excess[i] = plp.LpVariable(f"P_excess_{i}", lowBound=0, cat="Continuous")
                 
-                # Add penalty for each timestep's excess
+                # Add per-timestep penalty
                 capacity_penalty_term = plp.lpSum(
-                    -self.capacity_penalty * P_excess[i] 
+                    -self.capacity_penalty * P_excess[i]
                     for i in set_I
                 )
                 objective = objective + capacity_penalty_term
                 self.logger.info(
-                    f"Added per-timestep capacity tariff penalty to objective: "
-                    f"threshold={self.capacity_threshold}W, penalty={self.capacity_penalty} for {len(set_I)} timesteps"
+                    f"Added per-timestep capacity tariff penalty: "
+                    f"threshold={self.capacity_threshold}W, penalty={self.capacity_penalty}"
                 )
             
         opt_model.setObjective(objective)
-        self.logger.info(f"DEBUG: Objective function contains {len(objective)} terms")
         
         ## Setting constraints
         # The main constraint: power balance
@@ -831,7 +804,7 @@ class Optimization:
         # Capacity tariff constraints: define excess for each timestep
         if self.set_capacity_tariff:
             if self.capacity_threshold_is_list:
-                # For each active timestep, constrain: P_excess[i] >= P_grid_pos[i] - threshold[i]
+                # For each active timestep: P_excess[i] >= P_grid_pos[i] - threshold[i]
                 for threshold_val, timesteps in active_periods.items():
                     for i in timesteps:
                         constraints[f"constraint_excess_{int(threshold_val)}_{i}"] = plp.LpConstraint(
@@ -840,13 +813,10 @@ class Optimization:
                             rhs=0
                         )
                 self.logger.info(
-                    f"Added per-timestep capacity tariff excess constraints for {len(P_excess)} timesteps"
+                    f"Added capacity tariff excess constraints for {len(P_excess)} timesteps"
                 )
-                # ADD THIS DEBUG
-                self.logger.info(f"DEBUG: P_excess keys = {list(P_excess.keys())[:10]}...")  # First 10
-                self.logger.info(f"DEBUG: Sample constraint for i=54: P_excess[54] >= P_grid_pos[54] - 400")
             else:
-                # For single threshold - constrain each timestep
+                # Single threshold - constrain each timestep
                 for i in set_I:
                     constraints[f"constraint_excess_{i}"] = plp.LpConstraint(
                         e=P_excess[i] - (P_grid_pos[i] - self.capacity_threshold),
@@ -854,9 +824,8 @@ class Optimization:
                         rhs=0
                     )
                 self.logger.info(
-                    f"Added per-timestep capacity tariff excess constraints for all {len(set_I)} timesteps"
-                 )
-                self.logger.debug("Added capacity tariff peak tracking constraints")
+                    f"Added capacity tariff excess constraints for all {len(set_I)} timesteps"
+                )
 
         # Treat deferrable loads constraints
         predicted_temps = {}
@@ -1511,83 +1480,50 @@ class Optimization:
             opt_tp["P_hybrid_inverter"] = [P_hybrid_inverter[i].varValue for i in set_I]
         if self.plant_conf["compute_curtailment"]:
             opt_tp["P_PV_curtailment"] = [P_PV_curtailment[i].varValue for i in set_I]
+        opt_tp.index = data_opt.index
 
-        # Add capacity tariff results - per-timestep approach
+        # Add capacity tariff results to output DataFrame
         if self.set_capacity_tariff:
+            # Initialize arrays
+            excess_values = []
+            penalty_values = []
+            
+            for i in set_I:
+                if i in P_excess:
+                    excess_val = P_excess[i].varValue or 0.0
+                    penalty_val = -self.capacity_penalty * excess_val
+                    excess_values.append(excess_val)
+                    penalty_values.append(penalty_val)
+                else:
+                    excess_values.append(0.0)
+                    penalty_values.append(0.0)
+            
+            # Add columns to output
             if self.capacity_threshold_is_list:
-                # Time-series thresholds: report per-timestep data
                 opt_tp["capacity_threshold"] = capacity_threshold_array.tolist()
-                
-                excess_values = []
-                penalty_values = []
-                total_penalty = 0.0
-
-                for i in set_I:
-                    if i in P_excess:
-                        excess_val = P_excess[i].varValue or 0.0
-                        penalty_val = -self.capacity_penalty * excess_val
-                        excess_values.append(excess_val)
-                        penalty_values.append(penalty_val)
-                        total_penalty += penalty_val
-                    else:
-                        excess_values.append(0.0)
-                        penalty_values.append(0.0)
-                
-                opt_tp["P_excess"] = excess_values
-                opt_tp["capacity_penalty_cost"] = penalty_values
-                
-                # Store the total penalty as a single value repeated for all timesteps
-                # opt_tp["capacity_penalty_cost"] = total_penalty
-                # Don't overwrite! The penalty_values list is already correct
-                # Just log the total
-                
-                self.logger.info(
-                    f"Capacity tariff results (per-timestep): "
-                    f"Total penalty across all timesteps: {total_penalty:.2f}, "
-                    f"Total excess: {sum(excess_values):.0f}W"
-                )
-                
             else:
-                # Single threshold: report per-timestep
                 opt_tp["capacity_threshold"] = self.capacity_threshold
-                # Per-timestep excess and penalty
-                excess_values = [P_excess[i].varValue or 0.0 for i in set_I]
-                opt_tp["P_excess"] = excess_values
-                
-                penalty_values = [-self.capacity_penalty * (P_excess[i].varValue or 0.0) for i in set_I]
-                opt_tp["capacity_penalty_cost"] = penalty_values
-                
-                total_penalty = sum(penalty_values)
-                total_excess = sum(excess_values)
-                self.logger.info(
-                    f"Capacity tariff results (per-timestep): "
-                    f"Threshold: {self.capacity_threshold}W, "
-                    f"Total excess: {total_excess:.0f}W, "
-                    f"Total penalty: {total_penalty:.2f}"
+            
+            opt_tp["P_excess"] = excess_values
+            opt_tp["capacity_penalty_cost"] = penalty_values
+            
+            # Log summary
+            total_penalty = sum(penalty_values)
+            total_excess = sum(excess_values)
+            self.logger.info(
+                f"Capacity tariff results: "
+                f"Total excess: {total_excess:.0f}W, "
+                f"Total penalty: {total_penalty:.2f}"
+            )
+
+            # Temporary diagnostic
+            # Check for duplicate or irregular timestamps
+            time_diffs = opt_tp.index.to_series().diff()
+            if time_diffs.nunique() > 1:
+                self.logger.warning(
+                    f"Irregular index spacing detected: {time_diffs.value_counts()}"
                 )
-                # ADD THIS NEW DEBUG CODE HERE:
-                if self.set_capacity_tariff and self.optim_conf["set_use_battery"]:
-                    for i in P_excess.keys():
-                        excess_val = P_excess[i].varValue
-                        if excess_val is not None and excess_val > 100:  # Major violations
-                            self.logger.info(
-                                f"  Major violation at timestep {i}:"
-                                f" P_load={P_load[i]:.0f}W,"
-                                f" P_PV={P_PV[i]:.0f}W,"
-                                f" P_batt={opt_tp.loc[i, 'P_batt']:.0f}W,"
-                                f" SOC={opt_tp.loc[i, 'SOC_opt']*100:.1f}%,"
-                                f" P_grid={opt_tp.loc[i, 'P_grid']:.0f}W"
-                            )
-                for i in P_excess.keys():
-                    excess_val = P_excess[i].varValue
-                    if excess_val is not None and excess_val > 0.1:  # Only show violations > 0.1W
-                        grid_val = P_grid_pos[i].varValue if P_grid_pos[i].varValue is not None else 0
-                        threshold = capacity_threshold_array[i] if self.capacity_threshold_is_list else self.capacity_threshold
-                        penalty = excess_val * self.capacity_penalty
-                        self.logger.info(
-                            f"  Timestep {i}: P_grid={grid_val:.1f}W, Threshold={threshold:.0f}W, "
-                            f"Excess={excess_val:.1f}W, Penalty={penalty:.0f} SEK"
-                        )
+    
         # Lets compute the optimal cost function
         P_def_sum_tp = []
         for i in set_I:
@@ -1621,21 +1557,24 @@ class Optimization:
             ]
 
         if self.costfun == "profit":
+            # Get penalty values if capacity tariff is enabled
+            penalty_per_timestep = (
+                opt_tp["capacity_penalty_cost"].values 
+                if self.set_capacity_tariff 
+                else [0] * len(set_I)
+            )
+            
             if self.optim_conf["set_total_pv_sell"]:
-                # Get penalty values if they exist
-                penalty_per_timestep = opt_tp["capacity_penalty_cost"].values if self.set_capacity_tariff else [0] * len(set_I)
-                
                 opt_tp["cost_fun_profit"] = [
                     -0.001
                     * self.timeStep
                     * (
                         unit_load_cost[i] * (P_load[i] + P_def_sum_tp[i])
                         + unit_prod_price[i] * P_grid_neg[i].varValue
-                    ) + penalty_per_timestep[i] 
+                    ) + penalty_per_timestep[i]
                     for i in set_I
                 ]
             else:
-                penalty_per_timestep = opt_tp["capacity_penalty_cost"].values if self.set_capacity_tariff else [0] * len(set_I)
                 opt_tp["cost_fun_profit"] = [
                     -0.001
                     * self.timeStep
